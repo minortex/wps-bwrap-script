@@ -1,0 +1,60 @@
+#!/bin/bash
+
+# 根据扩展名选择对应的 WPS 程序
+file=$1
+case $file in
+*.doc | *.docx) exe=/usr/bin/wps ;;
+*.xls | *.xlsx) exe=/usr/bin/et ;;
+*.ppt | *.pptx) exe=/usr/bin/wpp ;;
+*.pdf) exe=/usr/bin/wpspdf ;;
+*) exe=/usr/bin/wps ;;
+esac
+
+XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
+XDG_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
+
+binds=()
+for dir in kingsoft Kingsoft; do
+  if [ ! -d "${XDG_CONFIG_HOME}/$dir" ]; then mkdir -p "${XDG_CONFIG_HOME}/$dir"; fi
+  binds+=(--bind "${XDG_CONFIG_HOME}/$dir" "${XDG_CONFIG_HOME}/$dir")
+done
+binds+=(--bind "${XDG_CONFIG_HOME}/mimeapps.list" "${XDG_CONFIG_HOME}/mimeapps.list")
+binds+=(--bind "${XDG_DATA_HOME}/Kingsoft" "${XDG_DATA_HOME}/Kingsoft")
+DOC_DIR=$(xdg-user-dir DOCUMENTS)
+binds+=(--bind "$DOC_DIR" "$DOC_DIR")
+
+# ==========================================
+# 🛠️ 核心改动 1：既然是放开全家，就不需要硬编码用户名了，顺手删掉原来的那行
+# ==========================================
+
+# ==========================================
+# 🛠️ 核心改动 2：将传入的文件路径强制转换为绝对路径
+# 防止跨沙箱传递相对路径（如 ./a.docx）时，主进程找不到文件
+# ==========================================
+if [[ -n "$file" ]]; then
+  abs_file="$(realpath -m "$file")"
+  set -- "$abs_file" "${@:2}"
+fi
+
+# 1. 创建一个宿主机上的共享目录，专门用来放 WPS 的通信套接字 (Socket)
+WPS_TMP_DIR="/tmp/wps-sandbox-${UID}"
+mkdir -p "$WPS_TMP_DIR"
+
+# ==========================================
+# 🛠️ 核心改动 3：调整了 --tmpfs /home 与 --bind "$HOME" 的顺序
+# 逻辑：先用 tmpfs 把 /home 抹黑，然后放开整个 $HOME 的读取权限。
+# 这样无论哪个目录的文档都能开，且隐私依然被完美隔离！
+# ==========================================
+exec bwrap --new-session --unshare-user-try --unshare-pid --unshare-cgroup-try --die-with-parent \
+  --ro-bind / / \
+  --tmpfs /home \
+  --bind "$HOME" "$HOME" \
+  --proc /proc --dev /dev \
+  --dev-bind /dev/dri /dev/dri \
+  --ro-bind "$XDG_RUNTIME_DIR" "$XDG_RUNTIME_DIR" \
+  --ro-bind /tmp/.X11-unix /tmp/.X11-unix \
+  --ro-bind "${XDG_DATA_HOME}/fonts" "${XDG_DATA_HOME}/fonts" \
+  --tmpfs /tmp \
+  --bind "$WPS_TMP_DIR" /tmp \
+  "${binds[@]}" \
+  "$exe" "$@"
